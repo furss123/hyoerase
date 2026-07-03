@@ -17,8 +17,10 @@
 
   STA + 관리자 권한 필요:  HyoErase 실행.cmd 를 더블클릭하세요(권한 자동 요청).
   -Auto 스위치로 실행하면 창 없이 기본 항목만 조용히 정리합니다(작업 스케줄러용).
+  -Watchdog 스위치로 실행하면 게임/VPN 프로세스를 한 번 검사해 즉시 종료하고
+  끝냅니다(실시간 감시용 반복 작업 스케줄러가 짧은 주기로 호출).
 #>
-param([switch]$Auto)
+param([switch]$Auto, [switch]$Watchdog)
 
 # ------------------------------------------------------------------
 #  관리자 권한 자동 승격
@@ -29,6 +31,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
   try {
     $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
     if ($Auto) { $relaunch += '-Auto' }
+    if ($Watchdog) { $relaunch += '-Watchdog' }
     Start-Process powershell.exe -Verb RunAs -ErrorAction Stop -ArgumentList $relaunch
     return
   } catch { }
@@ -36,7 +39,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.3.0'
+$AppVersion = '1.4.0'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
@@ -96,6 +99,26 @@ $UWP_REMOVE = @(
 $UWP_PROTECT = @(
   'xboxidentityprovider','xboxgameoverlay','xboxgamingoverlay','xbox.tcui','xboxgamecallableui',
   'xboxdevices','xboxspeechtotextoverlay','gamingservices','xboxgamebar'
+)
+# 워치독(실시간 감시)이 즉시 종료할 프로세스 이름(.exe 제외) — 확실한 게임/VPN 클라이언트만
+$WATCHDOG_PROCESS_NAMES = @(
+  'steam', 'steamwebhelper', 'epicgameslauncher', 'riotclientservices', 'riotclientservicesux',
+  'leagueclient', 'leagueclientux', 'battle.net', 'javaw', 'minecraftlauncher', 'robloxplayerbeta',
+  'kartrider', 'maplestory', 'dnf', 'sudden attack', 'crossfire',
+  'nordvpn', 'nordvpn-service', 'expressvpn', 'surfshark', 'surfshark-service',
+  'protonvpn', 'protonvpn-service', 'windscribe', 'tunnelbear', 'cyberghost8', 'hotspotshield',
+  'openvpn-gui', 'openvpn', 'wireguard', 'psiphon3', 'hola'
+)
+# 방화벽 차단 대상 — 흔히 쓰이는 VPN 프로토콜/포트(아웃바운드)
+$FIREWALL_VPN_RULES = @(
+  @{ Name = 'OpenVPN-UDP'; Protocol = 'UDP'; Port = 1194 }
+  @{ Name = 'OpenVPN-TCP'; Protocol = 'TCP'; Port = 1194 }
+  @{ Name = 'WireGuard';   Protocol = 'UDP'; Port = 51820 }
+  @{ Name = 'IKEv2-500';   Protocol = 'UDP'; Port = 500 }
+  @{ Name = 'IKEv2-4500';  Protocol = 'UDP'; Port = 4500 }
+  @{ Name = 'L2TP';        Protocol = 'UDP'; Port = 1701 }
+  @{ Name = 'PPTP-Ctrl';   Protocol = 'TCP'; Port = 1723 }
+  @{ Name = 'PPTP-GRE';    Protocol = '47';  Port = $null }
 )
 # hosts 재설치 차단 대상 — 잘 알려진 게임/VPN 배포·로그인 도메인만(정상 사이트 오차단 방지)
 $HOSTS_BLOCK_DOMAINS = @(
@@ -263,6 +286,10 @@ $Act_HostsBlock = { Set-HostsBlock }
 $Act_InstallLock = { Set-InstallLockdown }
 $Act_AutorunLock = { Set-AutorunBlock }
 $Act_ExecWhitelist = { Set-ExecWhitelist }
+$Act_FirewallVpn = { Set-FirewallVpnBlock }
+$Act_AdminToolsLock = { Set-AdminToolsLock }
+$Act_ScriptExecBlock = { Set-ScriptExecBlock }
+$Act_HashBlock = { Set-HashBlock }
 $Act_Clipboard = { try { Set-Clipboard -Value ' ' -ErrorAction SilentlyContinue } catch { } }
 $Act_Mru = {
   $keys = @(
@@ -356,6 +383,58 @@ function Remove-AutorunBlock {
 }
 
 # ------------------------------------------------------------------
+#  방화벽 기반 VPN 프로토콜 차단 — 되돌리기 가능(규칙 그룹으로 관리)
+#  hosts 차단(도메인)보다 견고함: IP가 바뀌어도 프로토콜/포트 자체를 막음.
+# ------------------------------------------------------------------
+$FW_GROUP = 'HyoErase-VPNBlock'
+function Set-FirewallVpnBlock {
+  Remove-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue
+  foreach ($r in $FIREWALL_VPN_RULES) {
+    try {
+      if ($r.Port) {
+        New-NetFirewallRule -Group $FW_GROUP -DisplayName "HyoErase VPN 차단 - $($r.Name)" `
+          -Direction Outbound -Action Block -Protocol $r.Protocol -RemotePort $r.Port `
+          -Profile Any -ErrorAction Stop | Out-Null
+      } else {
+        New-NetFirewallRule -Group $FW_GROUP -DisplayName "HyoErase VPN 차단 - $($r.Name)" `
+          -Direction Outbound -Action Block -Protocol $r.Protocol `
+          -Profile Any -ErrorAction Stop | Out-Null
+      }
+    } catch { }
+  }
+  $script:log.Add('[방화벽 VPN 차단] OpenVPN·WireGuard·IKEv2·L2TP·PPTP 프로토콜 아웃바운드 차단 적용')
+}
+function Remove-FirewallVpnBlock {
+  Remove-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue
+  $script:log.Add('[방화벽 VPN 차단] 해제 완료')
+}
+function Test-FirewallVpnBlockActive {
+  [bool](Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)
+}
+
+# ------------------------------------------------------------------
+#  레지스트리 편집기·작업관리자 접근 차단  ⚠⚠
+#  주의: 이 두 정책은 HKLM에 적용 시 관리자 계정도 예외 없이 함께 막힙니다.
+#  잠그면 regedit/작업관리자로는 되돌릴 수 없으니, HyoErase를 다시 실행해
+#  "🔓 모든 잠금 해제"로만 원복하세요(이 앱 자체는 이 정책의 영향을 받지 않음).
+# ------------------------------------------------------------------
+$REG_SYSPOLICY = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+function Set-AdminToolsLock {
+  New-Item -Path $REG_SYSPOLICY -Force -ErrorAction SilentlyContinue | Out-Null
+  Set-ItemProperty -Path $REG_SYSPOLICY -Name 'DisableRegistryTools' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+  Set-ItemProperty -Path $REG_SYSPOLICY -Name 'DisableTaskMgr' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+  $script:log.Add('[레지스트리·작업관리자 차단] 활성화 (관리자 계정도 함께 적용됨 — 해제는 HyoErase의 잠금 해제 버튼으로)')
+}
+function Remove-AdminToolsLock {
+  Remove-ItemProperty -Path $REG_SYSPOLICY -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue
+  Remove-ItemProperty -Path $REG_SYSPOLICY -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue
+  $script:log.Add('[레지스트리·작업관리자 차단] 해제 완료')
+}
+function Test-AdminToolsLockActive {
+  try { (Get-ItemProperty -Path $REG_SYSPOLICY -Name 'DisableTaskMgr' -ErrorAction Stop).DisableTaskMgr -eq 1 } catch { $false }
+}
+
+# ------------------------------------------------------------------
 #  실행 화이트리스트 (소프트웨어 제한 정책/SRP) — 되돌리기 가능
 #  전략: 모든 프로그램을 일일이 허용 목록에 넣는 대신, 학생 계정이 새
 #  파일을 쓸 수 있는 위치(바탕화면·다운로드·임시폴더·USB)에서만 "실행"을
@@ -366,15 +445,26 @@ function Remove-AutorunBlock {
 $SRP_SAFER = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer'
 $SRP_ROOT  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers'
 
-function Set-ExecWhitelist {
+function Initialize-SrpBase {
   New-Item -Path $SRP_ROOT -Force -ErrorAction SilentlyContinue | Out-Null
   Set-ItemProperty -Path $SRP_ROOT -Name 'DefaultLevel' -Value 262144 -Type DWord -Force -ErrorAction SilentlyContinue
   Set-ItemProperty -Path $SRP_ROOT -Name 'PolicyScope' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
   Set-ItemProperty -Path $SRP_ROOT -Name 'TransparentEnabled' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-
   $disallowKey = Join-Path $SRP_ROOT '0\Paths'
   New-Item -Path $disallowKey -Force -ErrorAction SilentlyContinue | Out-Null
+  $disallowKey
+}
+function Add-SrpDisallowRule([string]$disallowKey, [string]$pathPattern, [string]$desc) {
+  $guid = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
+  $key = Join-Path $disallowKey $guid
+  New-Item -Path $key -Force -ErrorAction SilentlyContinue | Out-Null
+  Set-ItemProperty -Path $key -Name 'ItemData' -Value $pathPattern -Type String -Force -ErrorAction SilentlyContinue
+  Set-ItemProperty -Path $key -Name 'SaferFlags' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+  Set-ItemProperty -Path $key -Name 'Description' -Value $desc -Type String -Force -ErrorAction SilentlyContinue
+}
 
+function Set-ExecWhitelist {
+  $disallowKey = Initialize-SrpBase
   $blockPaths = @()
   foreach ($profile in (Get-UserProfileRoots)) {
     $blockPaths += @(
@@ -386,12 +476,7 @@ function Set-ExecWhitelist {
   foreach ($letter in @('D', 'E', 'F', 'G', 'H', 'I')) { $blockPaths += "$letter`:\" }
 
   foreach ($p in ($blockPaths | Select-Object -Unique)) {
-    $guid = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
-    $key = Join-Path $disallowKey $guid
-    New-Item -Path $key -Force -ErrorAction SilentlyContinue | Out-Null
-    Set-ItemProperty -Path $key -Name 'ItemData' -Value "$p\*" -Type String -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $key -Name 'SaferFlags' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $key -Name 'Description' -Value 'HyoErase 실행 차단 규칙' -Type String -Force -ErrorAction SilentlyContinue
+    Add-SrpDisallowRule $disallowKey "$p\*" 'HyoErase 실행 차단 규칙'
   }
   $script:log.Add('[실행 화이트리스트] 활성화 - 바탕화면/다운로드/임시폴더/이동식드라이브 실행 차단, 관리자 계정 예외')
 }
@@ -402,7 +487,105 @@ function Remove-ExecWhitelist {
 function Test-ExecWhitelistActive {
   $pathsKey = Join-Path $SRP_ROOT '0\Paths'
   if (-not (Test-Path -LiteralPath $pathsKey)) { return $false }
-  [bool](Get-ChildItem -LiteralPath $pathsKey -ErrorAction SilentlyContinue)
+  [bool](Get-ChildItem -LiteralPath $pathsKey -ErrorAction SilentlyContinue |
+    Where-Object { (Get-ItemProperty -LiteralPath $_.PSPath -Name Description -ErrorAction SilentlyContinue).Description -eq 'HyoErase 실행 차단 규칙' })
+}
+
+# ------------------------------------------------------------------
+#  cmd·PowerShell 실행 제한 (표준 사용자)  ⚠⚠ — SRP 경로 규칙 재사용
+#  주의: 정상적인 배치파일 기반 수업 도구·설치 프로그램이 내부적으로
+#  cmd/PowerShell을 호출하는 경우까지 함께 막힐 수 있습니다.
+# ------------------------------------------------------------------
+function Set-ScriptExecBlock {
+  $disallowKey = Initialize-SrpBase
+  $targets = @(
+    "$env:SystemRoot\System32\cmd.exe",
+    "$env:SystemRoot\SysWOW64\cmd.exe",
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
+    "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe",
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell_ise.exe",
+    "$env:ProgramFiles\PowerShell\7\pwsh.exe"
+  )
+  foreach ($t in $targets) {
+    Add-SrpDisallowRule $disallowKey $t 'HyoErase 스크립트 실행 차단 규칙'
+  }
+  $script:log.Add('[스크립트 실행 차단] cmd·PowerShell 실행 차단 적용, 관리자 계정 예외')
+}
+function Remove-ScriptExecBlock {
+  Remove-Item -Path $SRP_SAFER -Recurse -Force -ErrorAction SilentlyContinue
+  $script:log.Add('[스크립트 실행 차단] 해제 완료')
+}
+function Test-ScriptExecBlockActive {
+  $pathsKey = Join-Path $SRP_ROOT '0\Paths'
+  if (-not (Test-Path -LiteralPath $pathsKey)) { return $false }
+  [bool](Get-ChildItem -LiteralPath $pathsKey -ErrorAction SilentlyContinue |
+    Where-Object { (Get-ItemProperty -LiteralPath $_.PSPath -Name Description -ErrorAction SilentlyContinue).Description -eq 'HyoErase 스크립트 실행 차단 규칙' })
+}
+
+# ------------------------------------------------------------------
+#  해시 기반 실행 차단 (AppLocker) — Windows Pro/Education/Enterprise 전용  ⚠⚠
+#  SRP의 원시 해시 레지스트리 구조는 문서화가 부실해 잘못 만들면 조용히
+#  아무 효과가 없을 위험이 있어, 대신 Microsoft가 제공하는 정식 AppLocker
+#  cmdlet으로 구현한다. Home 에디션이나 서비스 시작 실패 시 안전하게 건너뜀.
+# ------------------------------------------------------------------
+function Test-AppLockerAvailable { [bool](Get-Command Get-AppLockerPolicy -ErrorAction SilentlyContinue) }
+
+function Set-HashBlock {
+  if (-not (Test-AppLockerAvailable)) {
+    $script:log.Add('[해시 기반 차단] 건너뜀 — 이 Windows 에디션은 AppLocker를 지원하지 않음(Pro/Education/Enterprise 필요)')
+    return $false
+  }
+  try {
+    Set-Service -Name AppIDSvc -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name AppIDSvc -ErrorAction SilentlyContinue
+
+    $exeFiles = @()
+    foreach ($a in (Get-InstalledApps)) {
+      $cat = Get-AppCategory $a
+      if (($cat -eq 'game' -or $cat -eq 'vpn') -and $a.InstallLocation -and (Test-Path -LiteralPath $a.InstallLocation)) {
+        $exeFiles += Get-ChildItem -LiteralPath $a.InstallLocation -Recurse -Filter '*.exe' -File -ErrorAction SilentlyContinue
+      }
+    }
+    if ($exeFiles.Count -eq 0) {
+      $script:log.Add('[해시 기반 차단] 대상 실행파일을 찾지 못해 건너뜀 (현재 설치된 게임/VPN 없음)')
+      return $false
+    }
+    $fileInfo = $exeFiles | Select-Object -Unique -Property FullName | ForEach-Object { Get-AppLockerFileInformation -Path $_.FullName -ErrorAction SilentlyContinue }
+    $fileInfo = @($fileInfo | Where-Object { $_ })
+    if ($fileInfo.Count -eq 0) {
+      $script:log.Add('[해시 기반 차단] 파일 해시 정보를 만들지 못해 건너뜀')
+      return $false
+    }
+    $newPolicyXml = New-AppLockerPolicy -FileInformation $fileInfo -RuleType Hash -User Everyone -RuleNamePrefix 'HyoErase' -Xml
+    # New-AppLockerPolicy는 기본적으로 Allow 규칙을 생성 — 우리가 원하는 건
+    # "이 파일들만 차단"이므로 Action을 Deny로 뒤집는다 (직접 만든 XML만 대상).
+    $denyXml = $newPolicyXml -replace 'Action="Allow"', 'Action="Deny"'
+    Set-AppLockerPolicy -XmlPolicy $denyXml -Merge -ErrorAction Stop
+    $script:log.Add("[해시 기반 차단] $($fileInfo.Count)개 실행파일 해시 차단 규칙 적용")
+    return $true
+  } catch {
+    $script:log.Add("[해시 기반 차단] 실패: $($_.Exception.Message)")
+    return $false
+  }
+}
+function Remove-HashBlock {
+  if (-not (Test-AppLockerAvailable)) { return }
+  try {
+    [xml]$xml = (Get-AppLockerPolicy -Effective -Xml)
+    $nodes = $xml.SelectNodes("//*[starts-with(@Name, 'HyoErase')]")
+    if ($nodes.Count -gt 0) {
+      foreach ($n in @($nodes)) { $n.ParentNode.RemoveChild($n) | Out-Null }
+      Set-AppLockerPolicy -XmlPolicy $xml.OuterXml -ErrorAction SilentlyContinue
+    }
+    $script:log.Add('[해시 기반 차단] 해제 완료')
+  } catch { }
+}
+function Test-HashBlockActive {
+  if (-not (Test-AppLockerAvailable)) { return $false }
+  try {
+    [xml]$xml = (Get-AppLockerPolicy -Effective -Xml)
+    [bool]$xml.SelectNodes("//*[starts-with(@Name, 'HyoErase')]").Count
+  } catch { $false }
 }
 
 # ------------------------------------------------------------------
@@ -421,6 +604,31 @@ function Register-AutoTask {
   } catch { $false }
 }
 function Unregister-AutoTask { try { Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { } }
+
+# ------------------------------------------------------------------
+#  실시간 감시(워치독)  ⚠⚠ — 짧은 주기로 게임/VPN 프로세스를 즉시 종료
+#  하루 한 번이 아니라 몇 분마다 검사·강제종료해 "상시 감시"에 가깝게 동작.
+#  -Watchdog 스위치로 한 번 검사하고 종료 → 작업 스케줄러의 반복 트리거가
+#  주기적으로 재호출(짧게 실행되고 끝나므로 상주 프로세스가 남지 않음).
+# ------------------------------------------------------------------
+$WATCHDOG_TASK_NAME = 'HyoErase-Watchdog'
+function Invoke-Watchdog {
+  foreach ($name in $WATCHDOG_PROCESS_NAMES) {
+    Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+}
+function Test-WatchdogTaskExists { [bool](Get-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -ErrorAction SilentlyContinue) }
+function Register-WatchdogTask {
+  try {
+    $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Watchdog"
+    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration ([TimeSpan]::MaxValue)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    $true
+  } catch { $false }
+}
+function Unregister-WatchdogTask { try { Unregister-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { } }
 
 # ------------------------------------------------------------------
 #  정리 전 시스템 복원 지점 (안전장치)
@@ -496,6 +704,10 @@ function Get-Categories {
     [pscustomobject]@{ Key='installlock';  Group='lockdown'; Name='설치 잠금  ⚠'; On=$false; Type='action'; Desc='Microsoft Store 비활성화 + 표준사용자 새 프로그램 설치 차단'; Roots=@(); Action=$Act_InstallLock }
     [pscustomobject]@{ Key='autorunlock';  Group='lockdown'; Name='USB 자동실행 차단'; On=$true; Type='action'; Desc='USB로 게임을 자동 실행하지 못하게 막음 (안전, 되돌리기 쉬움)'; Roots=@(); Action=$Act_AutorunLock }
     [pscustomobject]@{ Key='execwhitelist'; Group='lockdown'; Name='실행 화이트리스트 — 바탕화면·다운로드·USB 실행 차단  ⚠⚠'; On=$false; Type='action'; Desc='학생 계정이 새로 내려받은 프로그램을 실행하는 것 자체를 차단(관리자 계정 예외, 재로그인 후 적용)'; Roots=@(); Action=$Act_ExecWhitelist }
+    [pscustomobject]@{ Key='firewallvpn';   Group='lockdown'; Name='방화벽 VPN 프로토콜 차단  ⚠'; On=$false; Type='action'; Desc='OpenVPN·WireGuard·IKEv2·L2TP·PPTP 프로토콜/포트 자체를 차단 (IP가 바뀌어도 유지, hosts보다 견고)'; Roots=@(); Action=$Act_FirewallVpn }
+    [pscustomobject]@{ Key='admintoolslock'; Group='lockdown'; Name='레지스트리·작업관리자 접근 차단  ⚠⚠'; On=$false; Type='action'; Desc='regedit·작업관리자 실행 차단 — 관리자 계정도 함께 막힘. 해제는 반드시 HyoErase의 잠금 해제 버튼으로'; Roots=@(); Action=$Act_AdminToolsLock }
+    [pscustomobject]@{ Key='scriptexecblock'; Group='lockdown'; Name='cmd·PowerShell 실행 차단  ⚠⚠'; On=$false; Type='action'; Desc='명령 프롬프트·PowerShell 실행 차단(관리자 예외) — 배치파일 기반 정상 프로그램도 함께 막힐 수 있음'; Roots=@(); Action=$Act_ScriptExecBlock }
+    [pscustomobject]@{ Key='hashblock';     Group='lockdown'; Name='해시 기반 실행 차단 (Pro/Education 전용)  ⚠'; On=$false; Type='action'; Desc='현재 설치된 게임/VPN 실행파일을 경로와 무관하게 해시로 차단 (Windows Home에서는 자동 건너뜀)'; Roots=@(); Action=$Act_HashBlock }
   )
 }
 
@@ -605,6 +817,7 @@ function Invoke-AutoClean {
   Save-Log | Out-Null
 }
 if ($Auto) { Invoke-AutoClean; exit }
+if ($Watchdog) { Invoke-Watchdog; exit }
 
 # ------------------------------------------------------------------
 #  UI
@@ -659,9 +872,10 @@ $mainXaml = @'
       <Button x:Name="CleanBtn" Grid.Column="2" Content="🧹  선택 항목 싹 정리" Style="{StaticResource Accent}"/>
     </Grid>
     <Grid Grid.Row="5" Margin="0,10,0,0">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-      <Button x:Name="ScheduleBtn" Grid.Column="0" Content="⏱ 자동 정리 예약" Style="{StaticResource Ghost}" Height="38"/>
-      <Button x:Name="UnlockBtn" Grid.Column="2" Content="🔓 모든 잠금 해제" Style="{StaticResource Ghost}" Height="38"/>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Button x:Name="ScheduleBtn" Grid.Column="0" Content="⏱ 자동 정리 예약" Style="{StaticResource Ghost}" Height="38" FontSize="12"/>
+      <Button x:Name="WatchdogBtn" Grid.Column="2" Content="👁 실시간 감시" Style="{StaticResource Ghost}" Height="38" FontSize="12"/>
+      <Button x:Name="UnlockBtn" Grid.Column="4" Content="🔓 잠금 해제" Style="{StaticResource Ghost}" Height="38" FontSize="12"/>
     </Grid>
     <TextBlock x:Name="Footer" Grid.Row="6" Margin="0,14,0,0" FontFamily="JetBrains Mono, Consolas" FontSize="10.5" TextAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
   </Grid>
@@ -675,6 +889,7 @@ $ScanBtn    = $window.FindName('ScanBtn')
 $CleanBtn   = $window.FindName('CleanBtn')
 $ThemeBtn   = $window.FindName('ThemeBtn')
 $ScheduleBtn = $window.FindName('ScheduleBtn')
+$WatchdogBtn = $window.FindName('WatchdogBtn')
 $UnlockBtn   = $window.FindName('UnlockBtn')
 $Footer     = $window.FindName('Footer'); $Footer.Text = $FooterText
 
@@ -813,7 +1028,12 @@ function Build-List {
   if (Test-HostsBlockActive)        { $lockState += 'hosts 차단' }
   if (Test-InstallLockdownActive)   { $lockState += '설치 잠금' }
   if (Test-ExecWhitelistActive)     { $lockState += '실행 화이트리스트' }
+  if (Test-ScriptExecBlockActive)   { $lockState += '스크립트 차단' }
+  if (Test-FirewallVpnBlockActive)  { $lockState += '방화벽 VPN 차단' }
+  if (Test-AdminToolsLockActive)    { $lockState += '레지스트리/작업관리자 차단' }
+  if (Test-HashBlockActive)         { $lockState += '해시 차단' }
   if (Test-AutoTaskExists)          { $lockState += '자동 예약' }
+  if (Test-WatchdogTaskExists)      { $lockState += '워치독' }
   $lockNote = if ($lockState.Count) { "  |  🔒 적용중: $($lockState -join ', ')" } else { '' }
   $StatusText.Text = "게임 $($games.Count) · VPN $($vpns.Count) · 스토어 $($uwp.Count) · 포터블 $($portables.Count) · 기타 $($others.Count) 감지됨$note$lockNote"
 }
@@ -844,11 +1064,27 @@ $ScheduleBtn.Add_Click({
   Build-List
 })
 
+$WatchdogBtn.Add_Click({
+  if (Test-WatchdogTaskExists) {
+    $ans = [System.Windows.MessageBox]::Show('실시간 감시(워치독)가 이미 켜져 있습니다. 끌까요?', 'HyoErase', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($ans -eq [System.Windows.MessageBoxResult]::Yes) { Unregister-WatchdogTask; [System.Windows.MessageBox]::Show('실시간 감시를 껐습니다.') | Out-Null }
+  } else {
+    $ans = [System.Windows.MessageBox]::Show("2분마다 게임/VPN 프로세스를 검사해 즉시 강제 종료하도록 켤까요?`n(하루 한 번이 아니라 상시 감시에 가깝게 동작합니다)", 'HyoErase — 실시간 감시', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+      if (Register-WatchdogTask) { [System.Windows.MessageBox]::Show('실시간 감시를 켰습니다 (2분 간격).') | Out-Null }
+      else { [System.Windows.MessageBox]::Show('등록에 실패했습니다. 관리자 권한으로 실행 중인지 확인하세요.') | Out-Null }
+    }
+  }
+  Build-List
+})
+
 $UnlockBtn.Add_Click({
-  $ans = [System.Windows.MessageBox]::Show('hosts 차단 · 설치 잠금 · 실행 화이트리스트 · USB 자동실행 차단 · 자동 정리 예약을 모두 해제할까요?', 'HyoErase — 잠금 해제', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+  $ans = [System.Windows.MessageBox]::Show('hosts 차단 · 설치 잠금 · 실행 화이트리스트 · 방화벽 VPN 차단 · 레지스트리/작업관리자 차단 · 스크립트 실행 차단 · 해시 차단 · USB 자동실행 차단 · 자동 정리/워치독 예약을 모두 해제할까요?', 'HyoErase — 잠금 해제', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
   if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
-  Remove-HostsBlock; Remove-InstallLockdown; Remove-AutorunBlock; Remove-ExecWhitelist; Unregister-AutoTask
-  [System.Windows.MessageBox]::Show('모든 잠금이 해제되었습니다. (실행 화이트리스트는 재로그인 후 완전히 반영됩니다)') | Out-Null
+  Remove-HostsBlock; Remove-InstallLockdown; Remove-AutorunBlock; Remove-ExecWhitelist
+  Remove-FirewallVpnBlock; Remove-AdminToolsLock; Remove-ScriptExecBlock; Remove-HashBlock
+  Unregister-AutoTask; Unregister-WatchdogTask
+  [System.Windows.MessageBox]::Show('모든 잠금이 해제되었습니다. (실행 화이트리스트·스크립트 차단은 재로그인 후 완전히 반영됩니다)') | Out-Null
   Build-List
 })
 
@@ -860,7 +1096,7 @@ $CleanBtn.Add_Click({
   $temps    = @($sel | Where-Object { $_.Kind -eq 'temp' })
   $portables = @($sel | Where-Object { $_.Kind -eq 'portable' })
   [long]$tempBytes = ($temps | ForEach-Object { $script:measured[$_.Payload.Key].Bytes } | Measure-Object -Sum).Sum
-  $riskyKeys = @('downloads','browserdat','eventlog','prefetch','fontcache','hostsblock','installlock','execwhitelist')
+  $riskyKeys = @('downloads','browserdat','eventlog','prefetch','fontcache','hostsblock','installlock','execwhitelist','firewallvpn','admintoolslock','scriptexecblock','hashblock')
   $risky = @($temps | Where-Object { $riskyKeys -contains $_.Payload.Key })
   $warn = if ($risky.Count) { "`n`n⚠ 영향 큰 항목 포함: " + (($risky | ForEach-Object { $_.Payload.Name.Replace(' ⚠','') }) -join ', ') } else { '' }
   $preview = if ($apps.Count) { ($apps | Select-Object -First 10 | ForEach-Object { "· $($_.Payload.Name)" }) -join "`n" } else { '(없음)' }
