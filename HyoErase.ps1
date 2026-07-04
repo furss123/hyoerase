@@ -29,7 +29,7 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 $isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
   try {
-    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$PSCommandPath`"")
     if ($Auto) { $relaunch += '-Auto' }
     if ($Watchdog) { $relaunch += '-Watchdog' }
     Start-Process powershell.exe -Verb RunAs -ErrorAction Stop -ArgumentList $relaunch
@@ -39,7 +39,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.4.0'
+$AppVersion = '1.4.1'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
