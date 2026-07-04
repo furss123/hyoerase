@@ -15,21 +15,31 @@
   절대 건드리지 않음(보호): 오피스(한컴/MS)·문서·그림 파일·드라이버·백신·
      브라우저·런타임·은행/공인인증 보안모듈.
 
-  STA + 관리자 권한 필요:  HyoErase 실행.cmd 를 더블클릭하세요(권한 자동 요청).
+  단일 실행파일(HyoErase.exe)로 배포됩니다 — 더블클릭하면 관리자 권한 요청
+  (UAC) 후 바로 실행됩니다(exe에 관리자 권한 필수 매니페스트 내장, -requireAdmin).
+  소스(.ps1)를 직접 실행할 경우를 대비해 자체 승격 로직도 남겨둔다.
   -Auto 스위치로 실행하면 창 없이 기본 항목만 조용히 정리합니다(작업 스케줄러용).
   -Watchdog 스위치로 실행하면 게임/VPN 프로세스를 한 번 검사해 즉시 종료하고
   끝냅니다(실시간 감시용 반복 작업 스케줄러가 짧은 주기로 호출).
 #>
 param([switch]$Auto, [switch]$Watchdog)
 
+# 컴파일된 exe 안에서는 $PSCommandPath가 비어있으므로(ps2exe 특성), 두 경우
+# 모두에서 정확히 "내 실행 파일 경로"를 돌려주는 헬퍼가 필요하다.
+function Get-SelfExePath {
+  if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue)) { return $PSCommandPath }
+  [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+}
+
 # ------------------------------------------------------------------
-#  관리자 권한 자동 승격
+#  관리자 권한 자동 승격 (exe 배포판은 매니페스트로 이미 강제되어 보통 안 탐)
 # ------------------------------------------------------------------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 $isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
   try {
-    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$PSCommandPath`"")
+    $selfPath = Get-SelfExePath
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$selfPath`"")
     if ($Auto) { $relaunch += '-Auto' }
     if ($Watchdog) { $relaunch += '-Watchdog' }
     Start-Process powershell.exe -Verb RunAs -ErrorAction Stop -ArgumentList $relaunch
@@ -39,7 +49,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.4.1'
+$AppVersion = '1.5.0'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
@@ -151,7 +161,7 @@ function Get-InstalledApps {
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
   )
-  $apps = @()
+  $apps = New-Object System.Collections.Generic.List[object]
   foreach ($p in $paths) {
     Get-ItemProperty -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
       $n = $_.DisplayName
@@ -161,12 +171,12 @@ function Get-InstalledApps {
       if ($n -match '^(KB\d{6,}|Security Update|Update for|Hotfix)') { return }
       $uq = $_.QuietUninstallString; $u = $_.UninstallString
       if (-not $u -and -not $uq) { return }
-      $apps += [pscustomobject]@{
+      $apps.Add([pscustomobject]@{
         Name = $n.Trim(); Publisher = $_.Publisher
         UninstallString = $u; QuietUninstallString = $uq
         InstallLocation = $_.InstallLocation
         Size = if ($_.EstimatedSize) { [long]$_.EstimatedSize * 1024 } else { 0 }
-      }
+      })
     }
   }
   $apps | Sort-Object Name -Unique
@@ -253,13 +263,13 @@ function Uninstall-App($app, [bool]$leftovers) {
 function Get-UwpApps {
   $pkgs = $null
   try { $pkgs = Get-AppxPackage -AllUsers -ErrorAction Stop } catch { try { $pkgs = Get-AppxPackage -ErrorAction SilentlyContinue } catch { $pkgs = @() } }
-  $out = @()
+  $out = New-Object System.Collections.Generic.List[object]
   foreach ($p in $pkgs) {
     if ($p.IsFramework) { continue }
     $nl = $p.Name.ToLower()
     if (Test-KwHit $nl $UWP_PROTECT) { continue }
     if (-not (Test-KwHit $nl $UWP_REMOVE)) { continue }
-    $out += [pscustomobject]@{ Name = $p.Name; Full = $p.PackageFullName }
+    $out.Add([pscustomobject]@{ Name = $p.Name; Full = $p.PackageFullName })
   }
   $out | Sort-Object Name -Unique
 }
@@ -387,6 +397,9 @@ function Remove-AutorunBlock {
 #  hosts 차단(도메인)보다 견고함: IP가 바뀌어도 프로토콜/포트 자체를 막음.
 # ------------------------------------------------------------------
 $FW_GROUP = 'HyoErase-VPNBlock'
+# Get-NetFirewallRule은 호출 자체가 느려서(실측 ~700ms) 매 스캔마다 다시
+# 묻지 않고, 실제로 켜거나 끌 때만 캐시를 무효화한다(Build-List가 스캔마다 초기화).
+$script:fwBlockActiveCache = $null
 function Set-FirewallVpnBlock {
   Remove-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue
   foreach ($r in $FIREWALL_VPN_RULES) {
@@ -402,14 +415,19 @@ function Set-FirewallVpnBlock {
       }
     } catch { }
   }
+  $script:fwBlockActiveCache = $null
   $script:log.Add('[방화벽 VPN 차단] OpenVPN·WireGuard·IKEv2·L2TP·PPTP 프로토콜 아웃바운드 차단 적용')
 }
 function Remove-FirewallVpnBlock {
   Remove-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue
+  $script:fwBlockActiveCache = $null
   $script:log.Add('[방화벽 VPN 차단] 해제 완료')
 }
 function Test-FirewallVpnBlockActive {
-  [bool](Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)
+  if ($null -eq $script:fwBlockActiveCache) {
+    $script:fwBlockActiveCache = [bool](Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)
+  }
+  $script:fwBlockActiveCache
 }
 
 # ------------------------------------------------------------------
@@ -592,18 +610,41 @@ function Test-HashBlockActive {
 #  자동 정리 예약 (작업 스케줄러) — 되돌리기 가능
 # ------------------------------------------------------------------
 $TASK_NAME = 'HyoErase-AutoClean'
-function Test-AutoTaskExists { [bool](Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) }
+# 자동정리·워치독 두 작업의 존재 여부를 매번 따로 조회(느림)하지 않고
+# 한 번의 와일드카드 조회로 합쳐서 캐싱 — Build-List가 매 스캔마다 무효화한다.
+$script:taskCache = $null
+function Get-HyoEraseTaskCache {
+  if ($null -eq $script:taskCache) {
+    $script:taskCache = @(Get-ScheduledTask -TaskName 'HyoErase-*' -ErrorAction SilentlyContinue)
+  }
+  $script:taskCache
+}
+# exe로 배포된 경우 실행 파일을 직접 실행하고, 소스(.ps1)로 직접 돌리는
+# 개발/테스트 상황이면 powershell.exe 경유로 실행한다.
+function New-HyoEraseTaskAction([string]$switchArg) {
+  $selfPath = Get-SelfExePath
+  if ($selfPath -like '*.exe') {
+    New-ScheduledTaskAction -Execute $selfPath -Argument $switchArg
+  } else {
+    New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$selfPath`" $switchArg"
+  }
+}
+function Test-AutoTaskExists { [bool](Get-HyoEraseTaskCache | Where-Object { $_.TaskName -eq $TASK_NAME }) }
 function Register-AutoTask {
   try {
-    $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Auto"
+    $action    = New-HyoEraseTaskAction '-Auto'
     $trigger   = New-ScheduledTaskTrigger -Daily -At 19:00
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
     Register-ScheduledTask -TaskName $TASK_NAME -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    $script:taskCache = $null
     $true
   } catch { $false }
 }
-function Unregister-AutoTask { try { Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { } }
+function Unregister-AutoTask {
+  try { Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+  $script:taskCache = $null
+}
 
 # ------------------------------------------------------------------
 #  실시간 감시(워치독)  ⚠⚠ — 짧은 주기로 게임/VPN 프로세스를 즉시 종료
@@ -617,18 +658,22 @@ function Invoke-Watchdog {
     Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   }
 }
-function Test-WatchdogTaskExists { [bool](Get-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -ErrorAction SilentlyContinue) }
+function Test-WatchdogTaskExists { [bool](Get-HyoEraseTaskCache | Where-Object { $_.TaskName -eq $WATCHDOG_TASK_NAME }) }
 function Register-WatchdogTask {
   try {
-    $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Watchdog"
+    $action    = New-HyoEraseTaskAction '-Watchdog'
     $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration ([TimeSpan]::MaxValue)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    $script:taskCache = $null
     $true
   } catch { $false }
 }
-function Unregister-WatchdogTask { try { Unregister-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { } }
+function Unregister-WatchdogTask {
+  try { Unregister-ScheduledTask -TaskName $WATCHDOG_TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+  $script:taskCache = $null
+}
 
 # ------------------------------------------------------------------
 #  정리 전 시스템 복원 지점 (안전장치)
@@ -649,11 +694,11 @@ function New-SafetyCheckpoint {
 function Get-PortableExeFindings {
   $roots = @("$env:USERPROFILE\Desktop", "$env:PUBLIC\Desktop", "$env:USERPROFILE\Downloads")
   $kws = @($GAME_KW) + @($VPN_KW)
-  $found = @()
+  $found = New-Object System.Collections.Generic.List[object]
   foreach ($r in $roots) {
     if (-not (Test-Path -LiteralPath $r)) { continue }
     Get-ChildItem -LiteralPath $r -Recurse -Depth 2 -Filter '*.exe' -File -ErrorAction SilentlyContinue | ForEach-Object {
-      if (Test-KwHit $_.FullName.ToLower() $kws) { $found += $_ }
+      if (Test-KwHit $_.FullName.ToLower() $kws) { $found.Add($_) }
     }
   }
   $found | Sort-Object FullName -Unique
@@ -739,7 +784,11 @@ function Measure-Category($cat) {
   }
   [long]$bytes = 0; $count = 0
   foreach ($root in (Resolve-Roots $cat.Roots)) {
-    try { Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $bytes += $_.Length; $count++ } } catch { }
+    try {
+      $m = Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum
+      if ($m.Count -gt 0) { $bytes += [long]$m.Sum; $count += $m.Count }
+    } catch { }
   }
   [pscustomobject]@{ Bytes = $bytes; Count = $count }
 }
@@ -770,7 +819,9 @@ function Clear-Category($cat) {
 
 function Save-Log {
   try {
-    $dir = Join-Path $PSScriptRoot 'logs'
+    # $PSScriptRoot도 컴파일된 exe 안에서는 비어있으므로(ps2exe 특성),
+    # 실행 파일 자신의 실제 폴더를 기준으로 로그 위치를 정한다.
+    $dir = Join-Path (Split-Path -Parent (Get-SelfExePath)) 'logs'
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $file = Join-Path $dir "HyoErase-$stamp.txt"
@@ -942,6 +993,10 @@ function Add-AppSection([string]$title, $list, [bool]$autocheck, [string]$tag) {
 function Add-CatGroup([string]$title, [string]$group) {
   $CatHost.Children.Add((New-Header $title)) | Out-Null
   foreach ($c in ($script:cats | Where-Object { $_.Group -eq $group })) {
+    # 큰 폴더(임시파일 등) 계산은 몇 초씩 걸릴 수 있어, 항목마다 한 번씩 창을
+    # 다시 그리게 해서 Windows가 "응답 없음"으로 표시하지 않도록 한다.
+    $StatusText.Text = "검사 중…  $($c.Name.Trim())"
+    $window.Dispatcher.Invoke([action] { }, [System.Windows.Threading.DispatcherPriority]::Render)
     $m = Measure-Category $c; $script:measured[$c.Key] = $m
     $right = switch ($c.Type) { 'action' { '실행' } 'recycle' { "$($m.Count)개" } default { Format-Size $m.Bytes } }
     $row = New-Row $c.On $c.Name $c.Desc $right
@@ -954,6 +1009,9 @@ function Build-List {
   $StatusText.Text = '시스템을 검사하는 중…'
   $window.Dispatcher.Invoke([action] { }, [System.Windows.Threading.DispatcherPriority]::Render)
   $CatHost.Children.Clear(); $script:items = @()
+  # 방화벽·예약작업 상태는 HyoErase 자신의 버튼을 통해서만 바뀌므로 재스캔마다
+  # 다시 조회하지 않고 캐시를 재사용한다(Set-/Register-/Unregister- 함수가
+  # 실제로 상태를 바꿀 때 각자 캐시를 무효화함).
 
   # 옵션
   $CatHost.Children.Add((New-Header '⚙ 옵션')) | Out-Null
