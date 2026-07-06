@@ -49,7 +49,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.6.0'
+$AppVersion = '1.6.1'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
@@ -186,10 +186,16 @@ function Test-SafeToDelete([string]$path) {
   if (-not $path) { return $false }
   $p = $path.TrimEnd('\')
   if ($p.Length -lt 12) { return $false }                      # 루트/짧은 경로 방지
+  if ($p -match '^\\\\') { return $false }                     # UNC(네트워크 공유) 경로 금지
   $guard = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData,
              $env:USERPROFILE, $env:LOCALAPPDATA, $env:APPDATA, "$env:SystemDrive\", "$env:SystemDrive\Users")
   foreach ($g in $guard) { if ($g -and ($p -ieq $g.TrimEnd('\'))) { return $false } }  # 보호 루트 자체면 금지
   if ($p -like "$env:SystemRoot\*") { return $false }          # 윈도우 폴더 하위 금지
+  # 프로그램 설치 위치가 네트워크 드라이브에 매핑된 문자를 가리키면 금지
+  # (레지스트리 InstallLocation이 비정상적으로 네트워크 드라이브를 가리키는
+  # 경우까지 대비 — Test-IsNetworkPath는 파일 아래쪽에 정의되어 있으나
+  # 이 함수가 실제로 호출되는 시점엔 이미 로드되어 있어 문제없다).
+  if (Test-IsNetworkPath $p) { return $false }
   $true
 }
 
@@ -219,7 +225,7 @@ function Remove-Leftovers($app) {
   $shortcutDirs = @(
     "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
     "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
-    "$env:PUBLIC\Desktop", "$env:USERPROFILE\Desktop")
+    "$env:PUBLIC\Desktop", "$env:USERPROFILE\Desktop") | Where-Object { -not (Test-IsNetworkPath $_) }
   $needle = ($app.Name -replace '[^\w가-힣]', '').ToLower()
   if ($needle.Length -ge 3) {
     foreach ($d in $shortcutDirs) {
@@ -481,6 +487,17 @@ function Add-SrpDisallowRule([string]$disallowKey, [string]$pathPattern, [string
   Set-ItemProperty -Path $key -Name 'Description' -Value $desc -Type String -Force -ErrorAction SilentlyContinue
 }
 
+# 지금 실제로 쓰이고 있지 않은(=아무 드라이브도 배정 안 된) 문자만 골라서
+# "나중에 USB가 꽂히면 그 문자를 쓸 것"이라 가정하고 미리 차단한다. 이렇게
+# 하면 학교 PC에 이미 있는 추가 내장 드라이브·네트워크 드라이브·클라우드
+# 동기화 드라이브(Google Drive 등, 겉보기엔 로컬 드라이브처럼 보임)를
+# 실수로 차단하지 않는다.
+function Get-UnassignedDriveLetters {
+  $used = @(Get-CimInstance -ClassName Win32_LogicalDisk -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.DeviceID.TrimEnd(':').ToUpper() })
+  @('D', 'E', 'F', 'G', 'H', 'I', 'J', 'K') | Where-Object { $_ -notin $used }
+}
+
 function Set-ExecWhitelist {
   $disallowKey = Initialize-SrpBase
   $blockPaths = @()
@@ -491,7 +508,7 @@ function Set-ExecWhitelist {
     )
   }
   $blockPaths += @("$env:PUBLIC\Desktop", "$env:PUBLIC\Downloads")
-  foreach ($letter in @('D', 'E', 'F', 'G', 'H', 'I')) { $blockPaths += "$letter`:\" }
+  foreach ($letter in (Get-UnassignedDriveLetters)) { $blockPaths += "$letter`:\" }
 
   foreach ($p in ($blockPaths | Select-Object -Unique)) {
     Add-SrpDisallowRule $disallowKey "$p\*" 'HyoErase 실행 차단 규칙'
@@ -692,7 +709,8 @@ function New-SafetyCheckpoint {
 #  포터블(설치 없는) 실행파일 감지 — 바탕화면·다운로드의 게임/VPN .exe
 # ------------------------------------------------------------------
 function Get-PortableExeFindings {
-  $roots = @("$env:USERPROFILE\Desktop", "$env:PUBLIC\Desktop", "$env:USERPROFILE\Downloads")
+  $roots = @("$env:USERPROFILE\Desktop", "$env:PUBLIC\Desktop", "$env:USERPROFILE\Downloads") |
+    Where-Object { -not (Test-IsNetworkPath $_) }
   $kws = @($GAME_KW) + @($VPN_KW)
   $found = New-Object System.Collections.Generic.List[object]
   foreach ($r in $roots) {
@@ -724,7 +742,7 @@ function Get-Categories {
     [pscustomobject]@{ Key='browser'; Group='basic'; Name='브라우저 캐시';    On=$true;  Type='files'; Desc='Chrome·Edge·Whale·Firefox 캐시(기록·비번 유지)'; Roots=@("$env:LOCALAPPDATA\Google\Chrome\User Data\*\Cache","$env:LOCALAPPDATA\Google\Chrome\User Data\*\Code Cache","$env:LOCALAPPDATA\Microsoft\Edge\User Data\*\Cache","$env:LOCALAPPDATA\Microsoft\Edge\User Data\*\Code Cache","$env:LOCALAPPDATA\Naver\Naver Whale\User Data\*\Cache","$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*\cache2"); Action=$null }
     [pscustomobject]@{ Key='recent';  Group='basic'; Name='최근 문서 기록';   On=$true;  Type='files'; Desc='최근 사용 목록·점프리스트(흔적)'; Roots=@("$env:APPDATA\Microsoft\Windows\Recent"); Action=$null }
     [pscustomobject]@{ Key='dumps';   Group='basic'; Name='오류 덤프 파일';   On=$true;  Type='files'; Desc='크래시 덤프'; Roots=@("$env:LOCALAPPDATA\CrashDumps"); Action=$null }
-    [pscustomobject]@{ Key='recycle'; Group='basic'; Name='휴지통 비우기(전체 드라이브)'; On=$true; Type='recycle'; Desc='모든 드라이브의 휴지통을 비웁니다'; Roots=@(); Action=$null }
+    [pscustomobject]@{ Key='recycle'; Group='basic'; Name='휴지통 비우기'; On=$true; Type='recycle'; Desc='시스템 드라이브(보통 C:)의 휴지통만 비웁니다 — 다른 드라이브·네트워크 드라이브는 건드리지 않음'; Roots=@(); Action=$null }
 
     # ---- 딥 시스템 청소 ----
     [pscustomobject]@{ Key='alltemp';   Group='deep'; Name='모든 사용자 임시폴더'; On=$true;  Type='files'; Desc='C:\Users\*\AppData\Local\Temp (관리자)'; Roots=@("$env:SystemDrive\Users\*\AppData\Local\Temp"); Action=$null }
@@ -759,6 +777,19 @@ function Get-Categories {
 # ------------------------------------------------------------------
 #  측정/삭제 공통
 # ------------------------------------------------------------------
+# 학교/회사 PC는 "폴더 리디렉션" 정책으로 바탕화면·다운로드·AppData가 실제로는
+# 네트워크 파일 서버를 가리키는 경우가 있다. 그런 경로는 절대 측정/삭제 대상에
+# 포함하지 않는다 — 이 검사는 Resolve-Roots를 거치는 모든 정리 항목에 공통 적용.
+function Test-IsNetworkPath([string]$path) {
+  if (-not $path) { return $false }
+  if ($path -match '^\\\\') { return $true }  # UNC 경로 (\\서버\공유)
+  $letter = $path.Substring(0, 1).ToUpper()
+  if ($letter -notmatch '^[A-Z]$') { return $false }
+  try {
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${letter}:'" -ErrorAction Stop
+    return ($disk -and $disk.DriveType -eq 4)  # 4 = 네트워크 드라이브
+  } catch { return $false }
+}
 function Resolve-Roots($patterns) {
   $out = @()
   foreach ($p in $patterns) {
@@ -767,7 +798,7 @@ function Resolve-Roots($patterns) {
       elseif (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue) { $out += $p }
     } catch { }
   }
-  $out | Select-Object -Unique
+  $out | Where-Object { -not (Test-IsNetworkPath $_) } | Select-Object -Unique
 }
 function Format-Size([long]$b) {
   if     ($b -ge 1GB) { '{0:N2} GB' -f ($b / 1GB) }
@@ -778,8 +809,20 @@ function Format-Size([long]$b) {
 function Measure-Category($cat) {
   if ($cat.Type -eq 'action') { return [pscustomobject]@{ Bytes = 0; Count = 0 } }
   if ($cat.Type -eq 'recycle') {
+    # 시스템 드라이브($env:SystemDrive, 보통 C:)에서만 직접 폴더를 읽어 측정한다.
+    # 예전에는 Shell.Application의 통합 휴지통 뷰(NameSpace 0xA)를 썼는데, 이건
+    # PC에 꽂힌 모든 드라이브(추가 내장 드라이브·네트워크/클라우드 마운트 드라이브
+    # 등)의 휴지통까지 전부 합쳐서 보여줘 — 학교 PC의 C: 드라이브만 정리하려는
+    # 의도와 어긋난다.
     $count = 0; [long]$bytes = 0
-    try { $bin = (New-Object -ComObject Shell.Application).NameSpace(0xA); if ($bin) { foreach ($i in $bin.Items()) { $count++; try { $bytes += [long]$i.Size } catch { } } } } catch { }
+    $recycleDir = "$env:SystemDrive\`$Recycle.Bin"
+    if (Test-Path -LiteralPath $recycleDir) {
+      try {
+        $m = Get-ChildItem -LiteralPath $recycleDir -Recurse -File -Force -ErrorAction SilentlyContinue |
+          Measure-Object -Property Length -Sum
+        if ($m.Count -gt 0) { $bytes = [long]$m.Sum; $count = $m.Count }
+      } catch { }
+    }
     return [pscustomobject]@{ Bytes = $bytes; Count = $count }
   }
   [long]$bytes = 0; $count = 0
@@ -800,8 +843,11 @@ function Clear-Category($cat) {
   }
   if ($cat.Type -eq 'recycle') {
     $before = Measure-Category $cat
-    try { Clear-RecycleBin -Force -ErrorAction Stop } catch { }
-    $script:log.Add("[정리] 휴지통 $(Format-Size $before.Bytes)")
+    # -DriveLetter로 시스템 드라이브 하나만 명시 — 파라미터 없이 호출하면
+    # PC의 다른 모든 드라이브(추가 내장 드라이브·네트워크/클라우드 마운트)의
+    # 휴지통까지 함께 비워버리므로 반드시 지정해야 한다.
+    try { Clear-RecycleBin -DriveLetter $env:SystemDrive -Force -ErrorAction Stop } catch { }
+    $script:log.Add("[정리] 휴지통($env:SystemDrive) $(Format-Size $before.Bytes)")
     return [pscustomobject]@{ Freed = $before.Bytes; Removed = $before.Count; Failed = 0 }
   }
   [long]$freed = 0; $removed = 0; $failed = 0
