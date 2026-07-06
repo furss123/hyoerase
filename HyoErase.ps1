@@ -49,7 +49,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.5.0'
+$AppVersion = '1.6.0'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
@@ -886,7 +886,7 @@ $mainXaml = @'
       <Setter Property="Foreground" Value="White"/><Setter Property="FontSize" Value="15"/><Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Height" Value="46"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="10" Background="{DynamicResource AccentBrush}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+        <Border x:Name="b" CornerRadius="12" Background="{DynamicResource AccentBrush}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
         <ControlTemplate.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2B7CC7"/></Trigger>
           <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Background" Value="#39485C"/></Trigger>
@@ -896,7 +896,7 @@ $mainXaml = @'
       <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/><Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Height" Value="46"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="10" BorderThickness="1" BorderBrush="{DynamicResource AccentBrush}" Background="Transparent"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+        <Border x:Name="b" CornerRadius="12" BorderThickness="1" BorderBrush="{DynamicResource AccentBrush}" Background="Transparent"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
         <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#152230"/></Trigger></ControlTemplate.Triggers>
       </ControlTemplate></Setter.Value></Setter>
     </Style>
@@ -914,7 +914,7 @@ $mainXaml = @'
     <TextBlock Grid.Row="1" TextWrapping="Wrap" Margin="0,14,0,10" FontSize="12" Foreground="{DynamicResource TextSecondary}"
                Text="오피스·문서·그림·드라이버·백신·은행인증은 목록에 없고 삭제되지 않습니다. ⚠ 표시 항목은 영향이 크니 확인 후 선택하세요."/>
     <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="CatHost"/></ScrollViewer>
-    <Border Grid.Row="3" CornerRadius="10" Margin="0,4,0,12" Padding="14,10" Background="{DynamicResource CardBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}">
+    <Border Grid.Row="3" CornerRadius="14" Margin="0,4,0,12" Padding="14,10" Background="{DynamicResource CardBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}">
       <TextBlock x:Name="StatusText" TextWrapping="Wrap" FontSize="13" Foreground="{DynamicResource TextPrimary}" Text="시스템을 검사하는 중…"/>
     </Border>
     <Grid Grid.Row="4">
@@ -958,12 +958,36 @@ function New-TB([string]$text, [double]$size, $weight, [string]$brushKey, [bool]
   $tb
 }
 function New-Header([string]$text) { $tb = New-TB $text 13 'SemiBold' 'AccentBrush' $false; $tb.Margin = New-Object System.Windows.Thickness(2, 12, 0, 6); $tb }
+# HyoT 브랜드 톤(HyoT Blue·Purple·Teal·Orange)을 그대로 재사용한 카테고리 칩 색상
+# — Chaebi 등 다른 HyoT 프로그램과 같은 팔레트를 써서 "같은 회사 제품" 느낌을 준다.
+function Get-ChipColor([string]$tag) {
+  switch ($tag) {
+    '게임'   { '#4A9FE0' }  # HyoT Blue
+    'VPN'    { '#8B4FCC' }  # HyoT Purple
+    '스토어' { '#2A9B8A' }  # HyoT Teal(성공)
+    '포터블' { '#E87820' }  # HyoT Orange
+    default  { '#2C3B4E' }  # 그 외(옵션·용량·실행 등)는 중립 톤
+  }
+}
+function New-Chip([string]$text) {
+  $chip = New-Object System.Windows.Controls.Border
+  $chip.CornerRadius = New-Object System.Windows.CornerRadius(8)
+  $chip.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString((Get-ChipColor $text)))
+  $chip.Padding = New-Object System.Windows.Thickness(9, 3, 9, 3)
+  $chip.VerticalAlignment = 'Center'
+  $tb = New-Object System.Windows.Controls.TextBlock
+  $tb.Text = $text; $tb.FontSize = 10.5; $tb.FontWeight = 'Bold'
+  $tb.Foreground = [System.Windows.Media.Brushes]::White
+  $tb.FontFamily = New-Object System.Windows.Media.FontFamily('JetBrains Mono, Consolas')
+  $chip.Child = $tb
+  $chip
+}
 function New-Row([bool]$checked, [string]$title, [string]$subtitle, [string]$rightText) {
   $border = New-Object System.Windows.Controls.Border
   $border.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, 'CardBrush')
   $border.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, 'BorderBrush')
-  $border.BorderThickness = 1; $border.CornerRadius = New-Object System.Windows.CornerRadius(10)
-  $border.Padding = New-Object System.Windows.Thickness(12, 8, 12, 8); $border.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
+  $border.BorderThickness = 1; $border.CornerRadius = New-Object System.Windows.CornerRadius(14)
+  $border.Padding = New-Object System.Windows.Thickness(14, 10, 14, 10); $border.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
   $grid = New-Object System.Windows.Controls.Grid
   $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
   $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = [System.Windows.GridLength]::Auto
@@ -974,9 +998,9 @@ function New-Row([bool]$checked, [string]$title, [string]$subtitle, [string]$rig
   $sp.Children.Add((New-TB $title 13.5 'SemiBold' 'TextPrimary' $true)) | Out-Null
   if ($subtitle) { $t = New-TB $subtitle 11 $null 'TextSecondary' $true; $t.Margin = New-Object System.Windows.Thickness(0, 1, 0, 0); $sp.Children.Add($t) | Out-Null }
   $chk.Content = $sp; [System.Windows.Controls.Grid]::SetColumn($chk, 0); $grid.Children.Add($chk) | Out-Null
-  $tag = New-TB $rightText 11 'SemiBold' 'TextSecondary' $false; $tag.VerticalAlignment = 'Center'
-  $tag.Margin = New-Object System.Windows.Thickness(10, 0, 0, 0); $tag.FontFamily = New-Object System.Windows.Media.FontFamily('JetBrains Mono, Consolas')
-  [System.Windows.Controls.Grid]::SetColumn($tag, 1); $grid.Children.Add($tag) | Out-Null
+  $chip = New-Chip $rightText
+  $chip.Margin = New-Object System.Windows.Thickness(10, 0, 0, 0)
+  [System.Windows.Controls.Grid]::SetColumn($chip, 1); $grid.Children.Add($chip) | Out-Null
   $border.Child = $grid
   [pscustomobject]@{ Border = $border; Check = $chk }
 }
@@ -1068,12 +1092,10 @@ function Build-List {
   if ($others.Count -gt 0) {
     $selAllBtn = New-Object System.Windows.Controls.Button
     $selAllBtn.Content = '⚠ 기타 전체 선택 / 해제 (신중하게 확인 후 사용)'
-    $selAllBtn.Height = 36
+    $selAllBtn.Height = 40
+    $selAllBtn.FontSize = 12.5
     $selAllBtn.Margin = New-Object System.Windows.Thickness(0, 2, 0, 10)
-    $selAllBtn.Background = [System.Windows.Media.Brushes]::Transparent
-    $selAllBtn.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, 'AccentBrush')
-    $selAllBtn.SetResourceReference([System.Windows.Controls.Control]::BorderBrushProperty, 'AccentBrush')
-    $selAllBtn.BorderThickness = New-Object System.Windows.Thickness(1)
+    $selAllBtn.Style = $window.Resources['Ghost']
     $selAllBtn.Add_Click({
       $anyUnchecked = @($othersChecks | Where-Object { -not $_.IsChecked }).Count -gt 0
       foreach ($c in $othersChecks) { $c.IsChecked = $anyUnchecked }
