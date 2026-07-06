@@ -4,7 +4,7 @@
 철저히 지우고, 딥 시스템 청소·재설치 차단·자동 스케줄링까지 처리합니다.
 오피스·문서·그림 등 학교 관련 파일은 절대 건드리지 않습니다.
 
-`HyoErase (지우개) v1.6.1 | © 2026 HyoT. All rights reserved. | hyot.dev`
+`HyoErase (지우개) v1.6.2 | © 2026 HyoT. All rights reserved. | hyot.dev`
 
 ## 실행 방법
 1. **`HyoErase.exe`** 더블클릭 → 관리자 권한 요청(UAC, 예 클릭) → 콘솔창 없이 바로 프로그램 창이 뜹니다.

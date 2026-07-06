@@ -49,7 +49,7 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$AppVersion = '1.6.1'
+$AppVersion = '1.6.2'
 $FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
 
@@ -204,11 +204,14 @@ function Stop-AppProcesses($app) {
   if (-not $loc) { return }
   $loc = $loc.TrimEnd('\')
   if ($loc -like "$env:SystemRoot*") { return }
+  # StartsWith("...\Foo")만 검사하면 "...\FooBar" 같은 무관한 형제 폴더의
+  # 프로세스까지 같이 종료될 수 있어, 경로 구분자까지 포함해서 비교한다.
+  $locPrefix = "$loc\"
   try {
     Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
       try {
         $pp = $_.Path
-        if ($pp -and $pp.StartsWith($loc, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($pp -and ($pp.Equals($loc, [System.StringComparison]::OrdinalIgnoreCase) -or $pp.StartsWith($locPrefix, [System.StringComparison]::OrdinalIgnoreCase))) {
           Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
         }
       } catch { }
@@ -486,6 +489,21 @@ function Add-SrpDisallowRule([string]$disallowKey, [string]$pathPattern, [string
   Set-ItemProperty -Path $key -Name 'SaferFlags' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
   Set-ItemProperty -Path $key -Name 'Description' -Value $desc -Type String -Force -ErrorAction SilentlyContinue
 }
+# 실행 화이트리스트와 스크립트 차단은 같은 SRP Paths 폴더를 공유하므로,
+# Description으로 자기 규칙만 골라 지운다 — 전체 Safer 키를 지우면
+# 동시에 켜져 있는 다른 기능의 규칙까지 함께 사라져 버린다.
+function Remove-SrpRulesByDescription([string]$desc) {
+  $pathsKey = Join-Path $SRP_ROOT '0\Paths'
+  if (-not (Test-Path -LiteralPath $pathsKey)) { return }
+  Get-ChildItem -LiteralPath $pathsKey -ErrorAction SilentlyContinue | ForEach-Object {
+    if ((Get-ItemProperty -LiteralPath $_.PSPath -Name Description -ErrorAction SilentlyContinue).Description -eq $desc) {
+      Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  # 마지막 남은 규칙까지 지웠다면 빈 Safer 키 자체도 정리
+  $remaining = @(Get-ChildItem -LiteralPath $pathsKey -ErrorAction SilentlyContinue)
+  if ($remaining.Count -eq 0) { Remove-Item -Path $SRP_SAFER -Recurse -Force -ErrorAction SilentlyContinue }
+}
 
 # 지금 실제로 쓰이고 있지 않은(=아무 드라이브도 배정 안 된) 문자만 골라서
 # "나중에 USB가 꽂히면 그 문자를 쓸 것"이라 가정하고 미리 차단한다. 이렇게
@@ -499,6 +517,7 @@ function Get-UnassignedDriveLetters {
 }
 
 function Set-ExecWhitelist {
+  Remove-SrpRulesByDescription 'HyoErase 실행 차단 규칙'   # 재실행 시 중복 규칙 누적 방지
   $disallowKey = Initialize-SrpBase
   $blockPaths = @()
   foreach ($profile in (Get-UserProfileRoots)) {
@@ -516,7 +535,7 @@ function Set-ExecWhitelist {
   $script:log.Add('[실행 화이트리스트] 활성화 - 바탕화면/다운로드/임시폴더/이동식드라이브 실행 차단, 관리자 계정 예외')
 }
 function Remove-ExecWhitelist {
-  Remove-Item -Path $SRP_SAFER -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-SrpRulesByDescription 'HyoErase 실행 차단 규칙'
   $script:log.Add('[실행 화이트리스트] 해제 완료')
 }
 function Test-ExecWhitelistActive {
@@ -532,6 +551,7 @@ function Test-ExecWhitelistActive {
 #  cmd/PowerShell을 호출하는 경우까지 함께 막힐 수 있습니다.
 # ------------------------------------------------------------------
 function Set-ScriptExecBlock {
+  Remove-SrpRulesByDescription 'HyoErase 스크립트 실행 차단 규칙'   # 재실행 시 중복 규칙 누적 방지
   $disallowKey = Initialize-SrpBase
   $targets = @(
     "$env:SystemRoot\System32\cmd.exe",
@@ -547,7 +567,7 @@ function Set-ScriptExecBlock {
   $script:log.Add('[스크립트 실행 차단] cmd·PowerShell 실행 차단 적용, 관리자 계정 예외')
 }
 function Remove-ScriptExecBlock {
-  Remove-Item -Path $SRP_SAFER -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-SrpRulesByDescription 'HyoErase 스크립트 실행 차단 규칙'
   $script:log.Add('[스크립트 실행 차단] 해제 완료')
 }
 function Test-ScriptExecBlockActive {
