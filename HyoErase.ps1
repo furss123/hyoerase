@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
   HyoErase (지우개) — 학교/공용 PC 초강력 정리·관리 도구
-  © 2026 HyoT. All rights reserved. | hyot.dev
+  © 2026 HyoT. All rights reserved. · ⌂ hyot.dev
 
   "강력하되 안전하게" — 무엇을 지우는지 명확하고, 위험한 건 절대 자동 선택하지 않습니다.
 
@@ -50,8 +50,54 @@ if (-not $isAdmin -and -not $env:HYOERASE_NOELEV) {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $AppVersion = '1.6.2'
-$FooterText = "HyoErase (지우개) v$AppVersion | © 2026 HyoT. All rights reserved. | hyot.dev"
+$FooterText = "HyoErase v$AppVersion · © 2026 HyoT. All rights reserved. · ⌂ hyot.dev"
 $script:log = New-Object System.Collections.Generic.List[string]
+
+function Start-HyoUpdateCheck {
+  if ($Auto -or $Watchdog) { return }
+  $updateDir = Join-Path ([IO.Path]::GetTempPath()) 'HyoT\hyoerase-updates'
+  $marker = Join-Path $updateDir 'ready-update.json'
+  New-Item -ItemType Directory -Path $updateDir -Force | Out-Null
+  Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+
+  Start-Job -ArgumentList $AppVersion, $updateDir, $marker -ScriptBlock {
+    param($currentVersion, $dir, $markerPath)
+    try {
+      $manifest = Invoke-RestMethod -Uri 'https://hyot.dev/updates/hyoerase.json' -TimeoutSec 20
+      $latest = [string]$manifest.latest.stable
+      if (-not $latest -or ([version]$latest -le [version]$currentVersion)) { return }
+      $release = @($manifest.releases | Where-Object { $_.version -eq $latest } | Select-Object -First 1)
+      if (-not $release -or -not $release.primaryAsset) { return }
+      $asset = $release.primaryAsset
+      $path = Join-Path $dir ([string]$asset.filename)
+      $client = New-Object Net.WebClient
+      $client.DownloadFile([string]$asset.url, $path)
+      $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($path))).Replace('-', '').ToLowerInvariant()
+      if ($asset.sha256 -and $sha -ne ([string]$asset.sha256).ToLowerInvariant()) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue; return }
+      @{ version = $latest; path = $path } | ConvertTo-Json -Compress | Set-Content -LiteralPath $markerPath -Encoding UTF8
+    } catch { }
+  } | Out-Null
+
+  $timer = New-Object System.Windows.Threading.DispatcherTimer
+  $timer.Interval = [TimeSpan]::FromSeconds(5)
+  $timer.Add_Tick({
+    if (-not (Test-Path -LiteralPath $marker)) { return }
+    $timer.Stop()
+    try { $ready = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json } catch { return }
+    $ans = [System.Windows.MessageBox]::Show("HyoErase $($ready.version) update is ready.`nRestart now to update?", 'HyoErase Update', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
+    if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    $path = [string]$ready.path
+    if ($path.ToLowerInvariant().EndsWith('.msi')) {
+      Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart"
+    } elseif ($path.ToLowerInvariant().EndsWith('.exe')) {
+      Start-Process -FilePath $path -ArgumentList '/S /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-'
+    } else {
+      Start-Process explorer.exe -ArgumentList "`"$path`""
+    }
+    $window.Close()
+  })
+  $timer.Start()
+}
 
 # ------------------------------------------------------------------
 #  분류 키워드
@@ -1283,5 +1329,5 @@ $CleanBtn.Add_Click({
   $CleanBtn.IsEnabled = $true
 })
 
-$window.Add_ContentRendered({ Build-List })
+$window.Add_ContentRendered({ Build-List; Start-HyoUpdateCheck })
 $window.ShowDialog() | Out-Null
